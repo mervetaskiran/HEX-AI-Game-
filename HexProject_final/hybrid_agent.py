@@ -75,24 +75,20 @@ def a_star_distance(game, player):
 # --- PATH VISUALIZATION ---
 def get_visual_path(game, player):
     """
-    Compute a visualization path for the given player.
+    Estimate the most promising corridor for the given player.
 
-    Design goals:
-    - Path walks only on player's stones and empty cells (never on opponent stones).
-    - Start from the player's current stones (cluster-based), not from an empty edge.
-    - Prefer to stay close to the player's stone cluster.
-    - Strongly avoid cells that are adjacent to opponent stones (wall effect).
-    - After a path is found to the goal edge, extend it visually to both edges.
+    The search starts from the player's stones (their actual cluster), prefers
+    continuing on friendly stones (cost 0), penalises empty cells (cost 1) and
+    keeps a safe distance from opponent stones via an extra neighbor penalty.
+    The resulting path is extended visually toward both borders without ever
+    stepping on opponent stones.
     """
     size = game.size
     directions = [(-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0)]
 
-    # --- 1) Player stones (cluster) ---
-    stones = [(r, c) for r in range(size) for c in range(size)
-              if game.board[r, c] == player]
-
-    # Eğer henüz taş yoksa: ortadan düz bir çizgi çiz
+    stones = [(r, c) for r in range(size) for c in range(size) if game.board[r, c] == player]
     if not stones:
+        # No stones yet: provide a neutral guide down the board center.
         path = []
         if player == PLAYER_1:
             col = size // 2
@@ -104,302 +100,107 @@ def get_visual_path(game, player):
                 path.append((row, c))
         return path
 
-    # Küme merkezi (taşların ağırlık merkezi)
     cr = sum(r for r, _ in stones) / len(stones)
     cc = sum(c for _, c in stones) / len(stones)
 
     def heuristic(r, c):
-        # Hedef kenara uzaklık
-        if player == PLAYER_1:
-            goal_dist = (size - 1) - r    # alta ne kadar uzak
-        else:
-            goal_dist = (size - 1) - c    # sağa ne kadar uzak
-        # Taş kümesine uzaklık (path'i taşlara yakın tutmak için)
-        cluster_dist = abs(r - cr) + abs(c - cc)
-        return goal_dist + 0.4 * cluster_dist
+        goal_dist = (size - 1 - r) if player == PLAYER_1 else (size - 1 - c)
+        cluster_bias = abs(r - cr) + abs(c - cc)
+        return goal_dist + 0.35 * cluster_bias
 
-    # --- 2) A* başlangıcı: tüm taşlar ---
     pq = []
-    came_from = {}
     cost_so_far = {}
+    came_from = {}
+    best_node = None
+    best_score = float('inf')
 
-    for (r, c) in stones:
-        start = (r, c)
-        cost_so_far[start] = 0.0
-        came_from[start] = None
-        heapq.heappush(pq, (heuristic(r, c), start))
+    for stone in stones:
+        cost_so_far[stone] = 0.0
+        came_from[stone] = None
+        priority = heuristic(stone[0], stone[1])
+        heapq.heappush(pq, (priority, stone))
+        if priority < best_score:
+            best_score = priority
+            best_node = stone
 
     final_node = None
 
-    # --- 3) A* araması ---
     while pq:
-        _, current = heapq.heappop(pq)
-        r, c = current
+        priority, current = heapq.heappop(pq)
+        current_cost = cost_so_far[current]
 
-        # Hedef kenara ulaştı mı?
-        if (player == PLAYER_1 and r == size - 1) or \
-           (player == PLAYER_2 and c == size - 1):
+        if priority > current_cost + heuristic(*current) + 1e-6:
+            continue
+
+        r, c = current
+        if (player == PLAYER_1 and r == size - 1) or (player == PLAYER_2 and c == size - 1):
             final_node = current
             break
+
+        if priority < best_score:
+            best_score = priority
+            best_node = current
 
         for dr, dc in directions:
             nr, nc = r + dr, c + dc
             if 0 <= nr < size and 0 <= nc < size:
                 cell = game.board[nr, nc]
-
-                # Rakip taşın üstüne ASLA basma
                 if cell == -player:
                     continue
 
-                # Temel adım maliyeti
                 step_cost = 0.0 if cell == player else 1.0
-
-                # Rakip taşlara KOMŞU hücrelere ekstra ceza (duvar etkisi)
                 neighbor_penalty = 0.0
                 for dr2, dc2 in directions:
                     ar, ac = nr + dr2, nc + dc2
                     if 0 <= ar < size and 0 <= ac < size:
                         if game.board[ar, ac] == -player:
-                            neighbor_penalty += 3.0
+                            neighbor_penalty += 0.5
 
-                new_cost = cost_so_far[current] + step_cost + neighbor_penalty
+                new_cost = current_cost + step_cost + neighbor_penalty
                 next_node = (nr, nc)
-
-                if next_node not in cost_so_far or new_cost < cost_so_far[next_node]:
+                if new_cost < cost_so_far.get(next_node, float('inf')):
                     cost_so_far[next_node] = new_cost
-                    priority = new_cost + heuristic(nr, nc)
-                    heapq.heappush(pq, (priority, next_node))
                     came_from[next_node] = current
+                    heapq.heappush(pq, (new_cost + heuristic(nr, nc), next_node))
 
-    # --- 4) Kümeden hedef kenara path'i geri kur ---
+    target = final_node if final_node is not None else best_node
+    if target is None:
+        return []
+
     path = []
-    if final_node is not None:
-        cur = final_node
-        while cur is not None:
-            path.append(cur)
-            cur = came_from[cur]
-        path.reverse()
-    else:
-        # Nadiren: hedef kenara ulaşamazsa, hedefe en yakın taşı tek path yap
-        if player == PLAYER_1:
-            best = min(stones, key=lambda rc: (size - 1) - rc[0])
-        else:
-            best = min(stones, key=lambda rc: (size - 1) - rc[1])
-        path = [best]
+    cur = target
+    while cur is not None:
+        path.append(cur)
+        cur = came_from.get(cur)
+    path.reverse()
 
-    # --- 5) Path'i iki kenara görsel olarak uzat ---
+    # Extend visually toward both borders without crossing opponent stones.
     if path:
-        first = path[0]
-        last = path[-1]
         if player == PLAYER_1:
-            # Üst kenara
-            for r in range(first[0] - 1, -1, -1):
-                path.insert(0, (r, first[1]))
-            # Alt kenara
-            for r in range(last[0] + 1, size):
-                path.append((r, last[1]))
-        else:
-            # Sol kenara
-            for c in range(first[1] - 1, -1, -1):
-                path.insert(0, (first[0], c))
-            # Sağ kenara
-            for c in range(last[1] + 1, size):
-                path.append((last[0], c))
+            col_up = path[0][1]
+            r = path[0][0] - 1
+            while r >= 0 and game.board[r, col_up] != -player:
+                path.insert(0, (r, col_up))
+                r -= 1
 
-    return path
+            col_down = path[-1][1]
+            r = path[-1][0] + 1
+            while r < size and game.board[r, col_down] != -player:
+                path.append((r, col_down))
+                r += 1
+        else:
+            row_left = path[0][0]
+            c = path[0][1] - 1
+            while c >= 0 and game.board[row_left, c] != -player:
+                path.insert(0, (row_left, c))
+                c -= 1
 
+            row_right = path[-1][0]
+            c = path[-1][1] + 1
+            while c < size and game.board[row_right, c] != -player:
+                path.append((row_right, c))
+                c += 1
 
-def find_path_to_goal(game, player, start_stone):
-    """
-    Find path from a stone to the goal edge, aiming for the closest edge point.
-    """
-    size = game.size
-    pq = []
-    came_from = {}
-    cost_so_far = {}
-    
-    # Start from the stone
-    cost_so_far[start_stone] = 0
-    came_from[start_stone] = None
-    
-    def heuristic(r, c):
-        # For goal edge, prefer path that goes straight from stone
-        if player == PLAYER_1:
-            return (size - 1 - r)
-        else:
-            return (size - 1 - c)
-    
-    heapq.heappush(pq, (heuristic(start_stone[0], start_stone[1]), start_stone))
-    
-    directions = [(-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0)]
-    final_node = None
-    visited = set()
-    
-    while pq:
-        _, current = heapq.heappop(pq)
-        
-        if current in visited:
-            continue
-        visited.add(current)
-        
-        r, c = current
-        
-        # Check if reached goal edge
-        if (player == PLAYER_1 and r == size - 1) or (player == PLAYER_2 and c == size - 1):
-            final_node = current
-            break
-        
-        for dr, dc in directions:
-            nr, nc = r + dr, c + dc
-            if 0 <= nr < size and 0 <= nc < size:
-                if (nr, nc) in visited:
-                    continue
-                    
-                cell = game.board[nr, nc]
-                
-                if cell == -player:
-                    continue
-                
-                # Prefer own stones, penalize empty
-                step_cost = 0.1 if cell == player else 1.0
-                new_cost = cost_so_far[current] + step_cost
-                next_node = (nr, nc)
-                
-                if next_node not in cost_so_far or new_cost < cost_so_far[next_node]:
-                    cost_so_far[next_node] = new_cost
-                    priority = new_cost + heuristic(nr, nc)
-                    heapq.heappush(pq, (priority, next_node))
-                    came_from[next_node] = current
-    
-    # Reconstruct path
-    path = []
-    if final_node is not None:
-        curr = final_node
-        while curr is not None:
-            path.append(curr)
-            curr = came_from.get(curr)
-        path.reverse()
-    
-    return path
-
-def find_path_to_point(game, player, start_point, end_point):
-    """
-    Find path using A*.
-    If start_point is None, start from appropriate edge.
-    If end_point is None, go to goal edge.
-    """
-    size = game.size
-    pq = []
-    came_from = {}
-    cost_so_far = {}
-    
-    def heuristic(r, c):
-        if end_point:
-            # Distance to specific point
-            return abs(r - end_point[0]) + abs(c - end_point[1])
-        else:
-            # Distance to goal edge - prefer straight paths
-            if player == PLAYER_1:
-                # Distance to bottom edge, slight preference for staying in same column
-                return (size - 1 - r)
-            else:
-                # Distance to right edge, slight preference for staying in same row  
-                return (size - 1 - c)
-    
-    # Initialize starting position
-    if start_point:
-        # Start from specific stone
-        cost_so_far[start_point] = 0
-        came_from[start_point] = None
-        heapq.heappush(pq, (heuristic(start_point[0], start_point[1]), start_point))
-    else:
-        # Start from edge - find point closest to end_point
-        if player == PLAYER_1:
-            # Red: start from top edge
-            if end_point:
-                # Find closest edge point to target stone
-                best_col = end_point[1]
-                start = (0, best_col) if 0 <= best_col < size else (0, size // 2)
-            else:
-                start = (0, size // 2)
-            
-            if game.board[start[0], start[1]] != -player:
-                cost = 0 if game.board[start[0], start[1]] == player else 1
-                cost_so_far[start] = cost
-                came_from[start] = None
-                heapq.heappush(pq, (cost + heuristic(start[0], start[1]), start))
-        else:
-            # Blue: start from left edge
-            if end_point:
-                # Find closest edge point to target stone
-                best_row = end_point[0]
-                start = (best_row, 0) if 0 <= best_row < size else (size // 2, 0)
-            else:
-                start = (size // 2, 0)
-            
-            if game.board[start[0], start[1]] != -player:
-                cost = 0 if game.board[start[0], start[1]] == player else 1
-                cost_so_far[start] = cost
-                came_from[start] = None
-                heapq.heappush(pq, (cost + heuristic(start[0], start[1]), start))
-    
-    directions = [(-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0)]
-    final_node = None
-    visited = set()
-    
-    # A* search
-    while pq:
-        _, current = heapq.heappop(pq)
-        
-        if current in visited:
-            continue
-        visited.add(current)
-        
-        r, c = current
-        
-        # Check if reached goal
-        if end_point:
-            if current == end_point:
-                final_node = current
-                break
-        else:
-            # Check if reached goal edge
-            if (player == PLAYER_1 and r == size - 1) or (player == PLAYER_2 and c == size - 1):
-                final_node = current
-                break
-        
-        # Explore neighbors
-        for dr, dc in directions:
-            nr, nc = r + dr, c + dc
-            if 0 <= nr < size and 0 <= nc < size:
-                if (nr, nc) in visited:
-                    continue
-                    
-                cell = game.board[nr, nc]
-                
-                if cell == -player:
-                    continue
-                
-                # Prefer own stones (low cost), penalize empty
-                step_cost = 0.1 if cell == player else 1.0
-                new_cost = cost_so_far[current] + step_cost
-                next_node = (nr, nc)
-                
-                if next_node not in cost_so_far or new_cost < cost_so_far[next_node]:
-                    cost_so_far[next_node] = new_cost
-                    priority = new_cost + heuristic(nr, nc)
-                    heapq.heappush(pq, (priority, next_node))
-                    came_from[next_node] = current
-    
-    # Reconstruct path
-    path = []
-    if final_node is not None:
-        curr = final_node
-        while curr is not None:
-            path.append(curr)
-            curr = came_from.get(curr)
-        path.reverse()
-    
     return path
 
 # --- FEATURE EXTRACTION ---
@@ -506,8 +307,11 @@ class MCTSNode:
                                     my_neighbors.add((nr, nc))
 
             priority_moves = []
+            # Hard Mod: Hem rakip yol hem kendi bağlantılar
             if difficulty == "Hard":
                 priority_moves = list(opp_path_set.intersection(my_neighbors)) + list(opp_path_set)
+            # Medium Mod (GÜNCELLENDİ): Hem kendi bağlantılarına bak hem de fırsat varsa (kesişim) oraya bak.
+            # Eskiden sadece my_neighbors idi, şimdi intersection da eklendi.
             else: 
                 priority_moves = list(opp_path_set.intersection(my_neighbors)) + list(my_neighbors)
 
@@ -538,6 +342,7 @@ class HybridAI:
             self.uct_constant = 5.0 
             self.time_limit = 0.3
         elif difficulty == "Medium": 
+            # MEDIUM GÜNCELLEME: İterasyon 350 -> 550 (Bir tık daha zeki)
             self.iterations = 550 
             self.uct_constant = 1.4 
             self.time_limit = 1.2
@@ -567,7 +372,7 @@ class HybridAI:
 
         if self.difficulty == "Easy": return None, None
 
-        # SPEARHEAD
+        # MIZRAK UCU (SPEARHEAD)
         if self.difficulty in ["Hard", "Medium"]:
             opp_stones = []
             for r in range(game.size):
@@ -588,12 +393,14 @@ class HybridAI:
                         if game.board[step[0], step[1]] == EMPTY:
                             if self.difficulty == "Hard":
                                 return step, "SPEARHEAD_BLOCK"
+                            # MEDIUM GÜNCELLEME: Bloklama şansı %30 -> %50 (Bir tık daha dikkatli)
                             elif self.difficulty == "Medium" and random.random() < 0.5:
                                 return step, "SPEARHEAD_BLOCK"
 
-        # SHADOW DEFENSE
+        # 4. GÖLGE SAVUNMA
         if self.difficulty in ["Hard", "Medium"]:
             opp_dist = a_star_distance(game, opp)
+            # MEDIUM GÜNCELLEME: Panik mesafesi 3 -> 5 (Daha erken uyanır)
             trigger_dist = INF if self.difficulty == "Hard" else 5
             
             if opp_dist <= trigger_dist:
@@ -643,6 +450,7 @@ class HybridAI:
     def get_smart_simulation_move(self, valid_moves, game, player):
         if self.difficulty == "Easy": return random.choice(valid_moves)
 
+        # MEDIUM GÜNCELLEME: Akıllı hamle olasılığı %40 -> %60
         smart_prob = 0.95 if self.difficulty == "Hard" else 0.60
         
         if random.random() < smart_prob:
@@ -680,6 +488,7 @@ class HybridAI:
                     if my_neighbors > 0: score += 2 + my_neighbors   
                     if my_neighbors >= 2: score += 5                 
                 else:
+                    # Medium Update: Artık hafifçe rakibi de önemsiyor
                     if my_neighbors > 0: score += 3 + my_neighbors
                     if opp_neighbors > 0: score += 1
                     
@@ -766,4 +575,3 @@ def update_rl_weights(game_history, winner):
         with open("rl_weights.pkl", "wb") as f: pickle.dump(RL_WEIGHTS, f)
         print(f"Weights saved successfully: {RL_WEIGHTS}")
     except Exception as e: print(f"Error saving weights: {e}")
-    print(f"Updated RL Weights: {RL_WEIGHTS}")
